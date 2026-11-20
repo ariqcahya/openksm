@@ -1,0 +1,17 @@
+# Internal requirements & private specs
+requirement/
+
+# Git & OS
+.git/
+.gitignore
+.DS_Store
+
+# Secrets & local env
+.env
+.env.*
+
+# Build artifacts & dependencies
+bin/
+dist/
+node_modules/
+coverage.out
