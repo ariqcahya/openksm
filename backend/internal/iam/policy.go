@@ -189,3 +189,32 @@ func CheckMakerChecker(initiatorUserID, approverUserID string) error {
 	}
 	return nil
 }
+
+// EffectiveRolesAndPermissions returns unique role codes and permissions for a membership.
+func EffectiveRolesAndPermissions(m *MembershipContext, now time.Time) ([]string, []string) {
+	if m == nil || m.Status != "active" || (m.ExpiresAt != nil && !m.ExpiresAt.After(now)) {
+		return nil, nil
+	}
+	roleSet := map[string]bool{}
+	permSet := map[string]bool{}
+	for _, r := range m.Roles {
+		if r.ExpiresAt != nil && !r.ExpiresAt.After(now) {
+			continue
+		}
+		roleSet[r.RoleCode] = true
+		for p, ok := range rolePermissions[r.RoleCode] {
+			if ok {
+				permSet[p] = true
+			}
+		}
+	}
+	roles := make([]string, 0, len(roleSet))
+	for r := range roleSet {
+		roles = append(roles, r)
+	}
+	perms := make([]string, 0, len(permSet))
+	for p := range permSet {
+		perms = append(perms, p)
+	}
+	return roles, perms
+}

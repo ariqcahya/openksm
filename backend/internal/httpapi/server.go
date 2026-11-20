@@ -183,14 +183,16 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 		})
 
 		r.Post("/logout", func(w http.ResponseWriter, r *http.Request) {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "idnbase_session",
-				Value:    "",
-				Path:     "/",
-				MaxAge:   -1,
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-			})
+			for _, cname := range []string{"idnbase_session", "openksm_enduser_token"} {
+				http.SetCookie(w, &http.Cookie{
+					Name:     cname,
+					Value:    "",
+					Path:     "/",
+					MaxAge:   -1,
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+			}
 			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 	})
@@ -383,6 +385,22 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			default:
 				writeJSON(w, http.StatusOK, updated)
 			}
+		})
+
+		r.Get("/{orgId}/me", func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			userID := r.Context().Value(userRefIDKey).(string)
+			mc, err := orgSvc.GetMembershipContext(r.Context(), orgID, userID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load membership")
+				return
+			}
+			roles, perms := iam.EffectiveRolesAndPermissions(mc, time.Now().UTC())
+			writeJSON(w, http.StatusOK, map[string]any{
+				"user_ref_id": userID,
+				"roles":       roles,
+				"permissions": perms,
+			})
 		})
 
 		r.Get("/{orgId}/memberships", requireOrgPerm(orgSvc, iam.PermMembershipInv, func(w http.ResponseWriter, r *http.Request) {

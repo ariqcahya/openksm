@@ -11,16 +11,22 @@ import (
 	"time"
 )
 
-// Client wraps verified IDNBase v1.2.1 control-api endpoints.
+// Client wraps verified IDNBase v1.2.1 control-api and End-User Auth v2 endpoints.
 type Client struct {
 	baseURL    string
+	gatewayURL string
 	httpClient *http.Client
 }
 
 // NewClient creates a new IDNBase control-plane client.
-func NewClient(baseURL string) *Client {
+func NewClient(baseURL string, gatewayURL ...string) *Client {
+	gw := "http://graphql-gateway:4000"
+	if len(gatewayURL) > 0 && strings.TrimSpace(gatewayURL[0]) != "" {
+		gw = strings.TrimRight(gatewayURL[0], "/")
+	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		gatewayURL: gw,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -68,31 +74,69 @@ type SessionInfo struct {
 	} `json:"user"`
 }
 
-// VerifySession validates an IDNBase session cookie via /v1/auth/session.
+// VerifySession validates an IDNBase control-plane cookie or End-User Auth v2 token cookie.
 func (c *Client) VerifySession(ctx context.Context, sessionCookie string) (*SessionInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/auth/session", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Cookie", sessionCookie)
+	if strings.Contains(sessionCookie, "idnbase_session=") {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/auth/session", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Cookie", sessionCookie)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("session verification failed with status %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusOK {
+			var out SessionInfo
+			if err := json.NewDecoder(resp.Body).Decode(&out); err == nil && out.SessionID != "" && out.User.ID != "" {
+				return &out, nil
+			}
+		}
 	}
-	var out SessionInfo
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+
+	if token := extractCookieValue(sessionCookie, "openksm_enduser_token"); token != "" && c.gatewayURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.gatewayURL+"/auth/v1/ksm-sleman-01/user", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var eu struct {
+				User struct {
+					ID    string `json:"id"`
+					Email string `json:"email"`
+				} `json:"user"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&eu); err == nil && eu.User.ID != "" {
+				var out SessionInfo
+				out.SessionID = "enduser"
+				out.User.ID = eu.User.ID
+				out.User.Email = eu.User.Email
+				out.User.DisplayName = eu.User.Email
+				return &out, nil
+			}
+		}
 	}
-	if out.SessionID == "" || out.User.ID == "" {
-		return nil, fmt.Errorf("session not authenticated")
+
+	return nil, fmt.Errorf("session not authenticated")
+}
+
+func extractCookieValue(cookieHeader, name string) string {
+	for _, part := range strings.Split(cookieHeader, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 && kv[0] == name {
+			return kv[1]
+		}
 	}
-	return &out, nil
+	return ""
 }
 
 // ProvisionProjectRequest defines the payload for POST /v1/projects.
@@ -180,7 +224,7 @@ type LoginResult struct {
 	Cookies    []*http.Cookie
 }
 
-// Login forwards credentials to IDNBase /v1/auth/login.
+// Login forwards credentials to IDNBase control-api, falling back to End-User Auth v2.
 func (c *Client) Login(ctx context.Context, email, password string) (*LoginResult, error) {
 	bodyBytes, _ := json.Marshal(map[string]string{"email": email, "password": password})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/auth/login", bytes.NewReader(bodyBytes))
@@ -194,7 +238,42 @@ func (c *Client) Login(ctx context.Context, email, password string) (*LoginResul
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
+	if resp.StatusCode != http.StatusUnauthorized || c.gatewayURL == "" {
+		return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
+	}
+
+	// Fallback to End-User Auth v2 (/auth/v1/ksm-sleman-01/token)
+	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, c.gatewayURL+"/auth/v1/ksm-sleman-01/token", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := c.httpClient.Do(req2)
+	if err != nil {
+		return nil, err
+	}
+	defer resp2.Body.Close()
+	raw2, _ := io.ReadAll(io.LimitReader(resp2.Body, 1<<20))
+	if resp2.StatusCode == http.StatusOK {
+		var tok struct {
+			AccessToken string `json:"accessToken"`
+		}
+		if json.Unmarshal(raw2, &tok) == nil && tok.AccessToken != "" {
+			return &LoginResult{
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"authenticated":true}`),
+				Cookies: []*http.Cookie{{
+					Name:     "openksm_enduser_token",
+					Value:    tok.AccessToken,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+					MaxAge:   3600,
+				}},
+			}, nil
+		}
+	}
+	return &LoginResult{StatusCode: resp2.StatusCode, Body: raw2}, nil
 }
 
 // VerifyMFA forwards TOTP verification to IDNBase /v1/auth/mfa/verify.

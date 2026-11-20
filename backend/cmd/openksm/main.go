@@ -90,8 +90,12 @@ func runAPI(ctx context.Context, pool *pgxpool.Pool) {
 	if controlURL == "" {
 		controlURL = "http://control-api:3000"
 	}
+	gatewayURL := os.Getenv("IDNBASE_GATEWAY_URL")
+	if gatewayURL == "" {
+		gatewayURL = "http://graphql-gateway:4000"
+	}
 
-	idnClient := idnbase.NewClient(controlURL)
+	idnClient := idnbase.NewClient(controlURL, gatewayURL)
 	var orgSvc *org.Service
 	var tenantMgr *tenantdb.Manager
 	if pool != nil {
