@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/openksm/openksm/backend/internal/collection"
+	"github.com/openksm/openksm/backend/internal/finance"
 	"github.com/openksm/openksm/backend/internal/iam"
 	"github.com/openksm/openksm/backend/internal/org"
 	"github.com/openksm/openksm/backend/internal/platform/idnbase"
@@ -78,6 +79,17 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			return collection.NewService(tp), nil
 		}
 		return collection.NewService(pool), nil
+	}
+
+	getTenantFin := func(ctx context.Context, orgID string) (*finance.Service, error) {
+		if tenantMgr != nil {
+			tp, err := tenantMgr.PoolForOrg(ctx, orgID)
+			if err != nil {
+				return nil, err
+			}
+			return finance.NewService(tp), nil
+		}
+		return finance.NewService(pool), nil
 	}
 
 	r.Route("/api/v1/organizations", func(r chi.Router) {
@@ -426,6 +438,251 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"items": tasks})
+		}))
+
+		// --- M04: Tariffs, Subscriptions, Unique Invoices, Payments (Maker-Checker) & Ledger ---
+		r.Post("/{orgId}/tariffs", requireOrgPerm(orgSvc, iam.PermBillingManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Label         string `json:"label"`
+				AmountIDR     int64  `json:"amount_idr"`
+				EffectiveFrom string `json:"effective_from"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			t, err := finSvc.CreateTariff(r.Context(), body.Label, body.AmountIDR, body.EffectiveFrom)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, t)
+		}))
+
+		r.Post("/{orgId}/subscriptions", requireOrgPerm(orgSvc, iam.PermBillingManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				ServicePointID string `json:"service_point_id"`
+				TariffID       string `json:"tariff_id"`
+				StartedAt      string `json:"started_at"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			sub, err := finSvc.CreateSubscription(r.Context(), body.ServicePointID, body.TariffID, body.StartedAt)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, sub)
+		}))
+
+		r.Get("/{orgId}/invoices", requireOrgPerm(orgSvc, iam.PermFinanceRead, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			items, err := finSvc.ListInvoices(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list invoices")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		}))
+
+		r.Post("/{orgId}/invoices", requireOrgPerm(orgSvc, iam.PermBillingManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				SubscriptionID string `json:"subscription_id"`
+				BillingPeriod  string `json:"billing_period"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			inv, err := finSvc.IssueInvoice(r.Context(), userID, body.SubscriptionID, body.BillingPeriod)
+			switch {
+			case errors.Is(err, finance.ErrDuplicateInvoice):
+				writeError(w, http.StatusConflict, "DUPLICATE_INVOICE", err.Error())
+			case errors.Is(err, finance.ErrNotFound):
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "active subscription not found")
+			case err != nil:
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+			default:
+				writeJSON(w, http.StatusCreated, inv)
+			}
+		}))
+
+		r.Post("/{orgId}/payments", requireOrgPerm(orgSvc, iam.PermPaymentRecord, func(w http.ResponseWriter, r *http.Request) {
+			idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if len(idemKey) < 16 || len(idemKey) > 128 {
+				writeError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key header (16-128 chars) is required")
+				return
+			}
+			var body struct {
+				InvoiceID string `json:"invoice_id"`
+				AmountIDR int64  `json:"amount_idr"`
+				Method    string `json:"method"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			p, err := finSvc.RecordPayment(r.Context(), userID, body.InvoiceID, idemKey, body.Method, body.AmountIDR)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, p)
+		}))
+
+		r.Post("/{orgId}/payments/{paymentId}/verify", requireOrgPerm(orgSvc, iam.PermPaymentVerify, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			paymentID := chi.URLParam(r, "paymentId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			p, err := finSvc.VerifyAndPostPayment(r.Context(), userID, paymentID)
+			switch {
+			case errors.Is(err, finance.ErrNotFound):
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "payment not found")
+			case errors.Is(err, iam.ErrSelfApproval):
+				writeError(w, http.StatusForbidden, "MAKER_CHECKER_VIOLATION", err.Error())
+			case errors.Is(err, finance.ErrInvalidTransition):
+				writeError(w, http.StatusUnprocessableEntity, "INVALID_TRANSITION", err.Error())
+			case err != nil:
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			default:
+				writeJSON(w, http.StatusOK, p)
+			}
+		}))
+
+		r.Post("/{orgId}/payments/{paymentId}/reverse", requireOrgPerm(orgSvc, iam.PermPaymentReverse, func(w http.ResponseWriter, r *http.Request) {
+			idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if len(idemKey) < 16 || len(idemKey) > 128 {
+				writeError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key header (16-128 chars) is required")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			paymentID := chi.URLParam(r, "paymentId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			p, err := finSvc.ReversePayment(r.Context(), userID, paymentID)
+			switch {
+			case errors.Is(err, finance.ErrNotFound):
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "payment not found")
+			case errors.Is(err, finance.ErrInvalidTransition):
+				writeError(w, http.StatusUnprocessableEntity, "INVALID_TRANSITION", err.Error())
+			case err != nil:
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			default:
+				writeJSON(w, http.StatusOK, p)
+			}
+		}))
+
+		r.Get("/{orgId}/ledger/summary", requireOrgPerm(orgSvc, iam.PermFinanceRead, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			sum, err := finSvc.GetLedgerSummary(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to query ledger summary")
+				return
+			}
+			writeJSON(w, http.StatusOK, sum)
+		}))
+
+		r.Post("/{orgId}/adjustments", requireOrgPerm(orgSvc, iam.PermBillingManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				InvoiceID      string `json:"invoice_id"`
+				AmountDeltaIDR int64  `json:"amount_delta_idr"`
+				Reason         string `json:"reason"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			adj, err := finSvc.RequestAdjustment(r.Context(), userID, body.InvoiceID, body.Reason, body.AmountDeltaIDR)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, adj)
+		}))
+
+		r.Post("/{orgId}/adjustments/{adjId}/decide", requireOrgPerm(orgSvc, iam.PermPaymentVerify, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Decision string `json:"decision"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			adjID := chi.URLParam(r, "adjId")
+			finSvc, err := getTenantFin(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			adj, err := finSvc.DecideAdjustment(r.Context(), userID, adjID, body.Decision)
+			switch {
+			case errors.Is(err, finance.ErrNotFound):
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "adjustment request not found")
+			case errors.Is(err, iam.ErrSelfApproval):
+				writeError(w, http.StatusForbidden, "MAKER_CHECKER_VIOLATION", err.Error())
+			case errors.Is(err, finance.ErrInvalidTransition):
+				writeError(w, http.StatusUnprocessableEntity, "INVALID_TRANSITION", err.Error())
+			case err != nil:
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+			default:
+				writeJSON(w, http.StatusOK, adj)
+			}
 		}))
 	})
 

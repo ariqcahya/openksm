@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-type Tab = 'orgs' | 'members' | 'collections' | 'tasks';
+type Tab = 'orgs' | 'members' | 'collections' | 'finance' | 'tasks';
 
 interface QueuedPickup {
   stop_id: string;
@@ -96,7 +96,7 @@ export default function App() {
       </header>
 
       <nav style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '12px 0' }}>
-        {(['orgs', 'members', 'collections', 'tasks'] as Tab[]).map((t) => (
+        {(['orgs', 'members', 'collections', 'finance', 'tasks'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -147,6 +147,14 @@ export default function App() {
             </button>
           </div>
           {syncMsg && <p><small>{syncMsg}</small></p>}
+        </section>
+      )}
+
+      {tab === 'finance' && (
+        <section>
+          <h2>Billing, Payments &amp; Ledger (M04)</h2>
+          <p>Organization ID: <code>{selectedOrg || 'none'}</code></p>
+          <p><small>Endpoints: <code>/invoices</code>, <code>/payments</code>, <code>/adjustments</code>, <code>/ledger/summary</code></small></p>
         </section>
       )}
 

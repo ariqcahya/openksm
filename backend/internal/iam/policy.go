@@ -16,27 +16,34 @@ var (
 const (
 	RoleInstanceOwner = "instance_owner"
 	RoleInstanceAdmin = "instance_admin"
-	RoleOrgOwner      = "org_owner"
-	RoleOrgAdmin      = "org_admin"
-	RoleTreasurer     = "treasurer"
-	RoleOpsManager    = "ops_manager"
-	RoleCollector     = "collection_officer"
-	RoleCustomer      = "customer"
+	RoleOrgOwner       = "org_owner"
+	RoleOrgAdmin       = "org_admin"
+	RoleTreasurer      = "treasurer"
+	RoleBillingOfficer = "billing_officer"
+	RoleCashier        = "cashier"
+	RoleOpsManager     = "ops_manager"
+	RoleCollector      = "collection_officer"
+	RoleCustomer       = "customer"
 )
 
 // Permission constants.
 const (
-	PermOrgApply       = "organization:apply"
-	PermOrgApprove     = "organization:approve"
-	PermOrgManage      = "organization:manage"
-	PermMembershipInv  = "membership:invite"
-	PermMembershipRev  = "membership:revoke"
+	PermOrgApply          = "organization:apply"
+	PermOrgApprove        = "organization:approve"
+	PermOrgManage         = "organization:manage"
+	PermMembershipInv     = "membership:invite"
+	PermMembershipRev     = "membership:revoke"
 	PermUnitManage        = "unit:manage"
 	PermAreaManage        = "service_area:manage"
 	PermCustomerManage    = "customer:manage"
 	PermCollectionAssign  = "collection:assign"
 	PermCollectionExecute = "collection:execute"
 	PermTaskRead          = "task:read"
+	PermBillingManage     = "billing:manage"
+	PermPaymentRecord     = "payment:record"
+	PermPaymentVerify     = "payment:verify"
+	PermPaymentReverse    = "payment:reverse"
+	PermFinanceRead       = "finance:read"
 	PermAuditRead         = "audit:read"
 )
 
@@ -60,6 +67,11 @@ var rolePermissions = map[string]map[string]bool{
 		PermCollectionAssign:  true,
 		PermCollectionExecute: true,
 		PermTaskRead:          true,
+		PermBillingManage:     true,
+		PermPaymentRecord:     true,
+		PermPaymentVerify:     true,
+		PermPaymentReverse:    true,
+		PermFinanceRead:       true,
 		PermAuditRead:         true,
 	},
 	RoleOrgAdmin: {
@@ -71,6 +83,20 @@ var rolePermissions = map[string]map[string]bool{
 		PermCustomerManage:   true,
 		PermCollectionAssign: true,
 		PermTaskRead:         true,
+	},
+	RoleTreasurer: {
+		PermPaymentVerify:  true,
+		PermPaymentReverse: true,
+		PermFinanceRead:    true,
+		PermAuditRead:      true,
+	},
+	RoleBillingOfficer: {
+		PermBillingManage: true,
+		PermFinanceRead:   true,
+	},
+	RoleCashier: {
+		PermPaymentRecord: true,
+		PermFinanceRead:   true,
 	},
 	RoleOpsManager: {
 		PermUnitManage:       true,
