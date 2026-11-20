@@ -33,6 +33,14 @@ func (s *stubVerifier) VerifySession(ctx context.Context, sessionCookie string) 
 	return &out, nil
 }
 
+func (s *stubVerifier) Login(ctx context.Context, email, password string) (*idnbase.LoginResult, error) {
+	return &idnbase.LoginResult{StatusCode: http.StatusOK, Body: []byte(`{"mfaRequired":true}`)}, nil
+}
+
+func (s *stubVerifier) VerifyMFA(ctx context.Context, challengeToken, code string) (*idnbase.LoginResult, error) {
+	return &idnbase.LoginResult{StatusCode: http.StatusOK, Body: []byte(`{"authenticated":true}`)}, nil
+}
+
 func (s *stubVerifier) ProvisionProject(ctx context.Context, sessionCookie, csrfToken, idempotencyKey string, payload idnbase.ProvisionProjectRequest) (*idnbase.ProvisionProjectResponse, error) {
 	return &idnbase.ProvisionProjectResponse{
 		JobID:     "job-1",

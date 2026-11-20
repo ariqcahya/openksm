@@ -23,6 +23,8 @@ import (
 type SessionVerifier interface {
 	CheckHealth(ctx context.Context) (*idnbase.HealthStatus, error)
 	VerifySession(ctx context.Context, sessionCookie string) (*idnbase.SessionInfo, error)
+	Login(ctx context.Context, email, password string) (*idnbase.LoginResult, error)
+	VerifyMFA(ctx context.Context, challengeToken, code string) (*idnbase.LoginResult, error)
 	ProvisionProject(ctx context.Context, sessionCookie, csrfToken, idempotencyKey string, payload idnbase.ProvisionProjectRequest) (*idnbase.ProvisionProjectResponse, error)
 }
 
@@ -66,7 +68,79 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 	r.Get("/api/v1/info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"name":    "OpenKSM",
-			"version": "0.2.0-dev",
+			"version": "0.4.0-dev",
+		})
+	})
+
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Get("/session", func(w http.ResponseWriter, r *http.Request) {
+			cookieHeader := r.Header.Get("Cookie")
+			if cookieHeader == "" {
+				writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "not signed in")
+				return
+			}
+			sess, err := verifier.VerifySession(r.Context(), cookieHeader)
+			if err != nil || sess.User.ID == "" {
+				writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "invalid or expired session")
+				return
+			}
+			writeJSON(w, http.StatusOK, sess)
+		})
+
+		r.Post("/login", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Email    string `json:"email"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			res, err := verifier.Login(r.Context(), body.Email, body.Password)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "AUTH_UNAVAILABLE", "authentication service unavailable")
+				return
+			}
+			for _, c := range res.Cookies {
+				http.SetCookie(w, c)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(res.StatusCode)
+			_, _ = w.Write(res.Body)
+		})
+
+		r.Post("/mfa/verify", func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				ChallengeToken string `json:"challengeToken"`
+				Code           string `json:"code"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			res, err := verifier.VerifyMFA(r.Context(), body.ChallengeToken, body.Code)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "AUTH_UNAVAILABLE", "authentication service unavailable")
+				return
+			}
+			for _, c := range res.Cookies {
+				http.SetCookie(w, c)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(res.StatusCode)
+			_, _ = w.Write(res.Body)
+		})
+
+		r.Post("/logout", func(w http.ResponseWriter, r *http.Request) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "idnbase_session",
+				Value:    "",
+				Path:     "/",
+				MaxAge:   -1,
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+			})
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		})
 	})
 

@@ -172,3 +172,44 @@ func (c *Client) GetProject(ctx context.Context, sessionCookie, projectID string
 	}
 	return &out, nil
 }
+
+// LoginResult holds the raw JSON and cookies from IDNBase /v1/auth/login or /v1/auth/mfa/verify.
+type LoginResult struct {
+	StatusCode int
+	Body       []byte
+	Cookies    []*http.Cookie
+}
+
+// Login forwards credentials to IDNBase /v1/auth/login.
+func (c *Client) Login(ctx context.Context, email, password string) (*LoginResult, error) {
+	bodyBytes, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/auth/login", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
+}
+
+// VerifyMFA forwards TOTP verification to IDNBase /v1/auth/mfa/verify.
+func (c *Client) VerifyMFA(ctx context.Context, challengeToken, code string) (*LoginResult, error) {
+	bodyBytes, _ := json.Marshal(map[string]string{"challengeToken": challengeToken, "code": code})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/auth/mfa/verify", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
+}
