@@ -48,6 +48,10 @@ const (
 	PermFinanceRead       = "finance:read"
 	PermComplaintManage   = "complaint:manage"
 	PermReportExport      = "report:export"
+	PermWasteWeigh        = "waste:weigh"
+	PermInventoryMove     = "inventory:move"
+	PermSalesManage       = "sales:manage"
+	PermTransferManage    = "transfer:manage"
 	PermAuditRead         = "audit:read"
 )
 
@@ -78,6 +82,10 @@ var rolePermissions = map[string]map[string]bool{
 		PermFinanceRead:       true,
 		PermComplaintManage:   true,
 		PermReportExport:      true,
+		PermWasteWeigh:        true,
+		PermInventoryMove:     true,
+		PermSalesManage:       true,
+		PermTransferManage:    true,
 		PermAuditRead:         true,
 	},
 	RoleOrgAdmin: {

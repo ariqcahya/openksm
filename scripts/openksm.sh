@@ -16,6 +16,9 @@ Usage:
   $(basename "$0") up                Build (if needed) and start OpenKSM + IDNBase stack
   $(basename "$0") down              Stop stack (preserves persistent volumes)
   $(basename "$0") status            Show container status
+  $(basename "$0") backup            Create verified PostgreSQL backup with SHA256 checksums
+  $(basename "$0") restore-drill     Test restoring latest backup into isolated drill DB (measures RTO)
+  $(basename "$0") upgrade-check <v> Check manifest.lock.yaml compatibility before upgrading IDNBase
 EOF
 }
 
@@ -114,6 +117,55 @@ cmd_status() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
 }
 
+cmd_backup() {
+  local ts dir
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  dir="${ROOT_DIR}/backups/${ts}"
+  mkdir -p "${dir}"
+  chmod 700 "${ROOT_DIR}/backups" "${dir}"
+
+  echo "[backup] Dumping openksm_registry to ${dir}/openksm_registry.sql..."
+  docker exec openksm-postgres-1 pg_dump -U idnbase_bootstrap -d openksm_registry > "${dir}/openksm_registry.sql"
+  (cd "${dir}" && shasum -a 256 openksm_registry.sql > SHA256SUMS)
+  echo "[backup] Backup complete and checksummed at ${dir}"
+}
+
+cmd_restore_drill() {
+  local latest start_ts end_ts elapsed
+  latest="$(ls -1d "${ROOT_DIR}"/backups/* 2>/dev/null | sort | tail -n 1 || true)"
+  if [ -z "${latest}" ] || [ ! -f "${latest}/openksm_registry.sql" ]; then
+    echo "FAIL: No backup found. Run: $0 backup" >&2
+    exit 1
+  fi
+  echo "[restore-drill] Verifying checksum in ${latest}..."
+  (cd "${latest}" && shasum -a 256 -c SHA256SUMS)
+
+  start_ts="$(date +%s)"
+  docker exec openksm-postgres-1 psql -U idnbase_bootstrap -d postgres -c "DROP DATABASE IF EXISTS openksm_restore_drill;"
+  docker exec openksm-postgres-1 psql -U idnbase_bootstrap -d postgres -c "CREATE DATABASE openksm_restore_drill;"
+  docker exec -i openksm-postgres-1 psql -U idnbase_bootstrap -d openksm_restore_drill < "${latest}/openksm_registry.sql" >/dev/null
+  local org_count
+  org_count="$(docker exec openksm-postgres-1 psql -U idnbase_bootstrap -d openksm_restore_drill -tAc "SELECT COUNT(*) FROM organizations;" | tr -d '[:space:]')"
+  docker exec openksm-postgres-1 psql -U idnbase_bootstrap -d postgres -c "DROP DATABASE openksm_restore_drill;"
+  end_ts="$(date +%s)"
+  elapsed=$((end_ts - start_ts))
+  echo "[restore-drill] PASS: Restored ${org_count} organizations into isolated DB in ${elapsed}s (RTO measured)."
+}
+
+cmd_upgrade_check() {
+  local target="${1:-}"
+  local lock_file="${ROOT_DIR}/deploy/manifest.lock.yaml"
+  if [ -z "${target}" ]; then
+    echo "Usage: $0 upgrade-check <idnbase_version>" >&2
+    exit 1
+  fi
+  if ! grep -q "version: \"${target}\"" "${lock_file}"; then
+    echo "BLOCKED: Target IDNBase version '${target}' is UNKNOWN in ${lock_file}." >&2
+    exit 2
+  fi
+  echo "PASS: Target IDNBase version '${target}' is VERIFIED in manifest.lock.yaml."
+}
+
 case "${1:-}" in
   setup)
     cmd_setup "${2:-}"
@@ -129,6 +181,15 @@ case "${1:-}" in
     ;;
   status)
     cmd_status
+    ;;
+  backup)
+    cmd_backup
+    ;;
+  restore-drill)
+    cmd_restore_drill
+    ;;
+  upgrade-check)
+    cmd_upgrade_check "${2:-}"
     ;;
   *)
     usage

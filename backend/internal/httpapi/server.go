@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -14,10 +15,12 @@ import (
 	"github.com/openksm/openksm/backend/internal/collection"
 	"github.com/openksm/openksm/backend/internal/finance"
 	"github.com/openksm/openksm/backend/internal/iam"
+	"github.com/openksm/openksm/backend/internal/ops"
 	"github.com/openksm/openksm/backend/internal/org"
 	"github.com/openksm/openksm/backend/internal/platform/idnbase"
 	"github.com/openksm/openksm/backend/internal/support"
 	"github.com/openksm/openksm/backend/internal/tenantdb"
+	"github.com/openksm/openksm/backend/internal/waste"
 )
 
 // SessionVerifier abstracts IDNBase session verification for testability.
@@ -40,6 +43,21 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(15 * time.Second))
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ops.RequestCounter.Add(1)
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		dbUp := 0
+		if pool != nil && pool.Ping(r.Context()) == nil {
+			dbUp = 1
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "# TYPE openksm_api_up gauge\nopenksm_api_up 1\n# TYPE openksm_registry_db_up gauge\nopenksm_registry_db_up %d\n# TYPE openksm_http_requests_total counter\nopenksm_http_requests_total %d\n", dbUp, ops.RequestCounter.Load())
+	})
 
 	r.Get("/health/live", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -69,7 +87,39 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 	r.Get("/api/v1/info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"name":    "OpenKSM",
-			"version": "0.4.0-dev",
+			"version": "0.7.0-dev",
+		})
+	})
+
+	r.Route("/api/v1/system", func(r chi.Router) {
+		r.Use(authMiddleware(verifier, orgSvc))
+
+		r.Get("/status", func(w http.ResponseWriter, r *http.Request) {
+			h, herr := verifier.CheckHealth(r.Context())
+			idnVer := "unreachable"
+			if herr == nil && h != nil {
+				idnVer = h.Version
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"openksm_version":  "0.7.0-dev",
+				"idnbase_version":  idnVer,
+				"idnbase_verified": ops.VerifiedIDNBaseVersions[idnVer],
+				"docker_exec_api":  false,
+			})
+		})
+
+		r.Post("/upgrade-preflight", func(w http.ResponseWriter, r *http.Request) {
+			var in ops.UpgradePreflightInput
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			res := ops.CheckUpgradePreflight(in)
+			if !res.Allowed {
+				writeJSON(w, http.StatusConflict, res)
+				return
+			}
+			writeJSON(w, http.StatusOK, res)
 		})
 	})
 
@@ -176,6 +226,17 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			return support.NewService(tp), nil
 		}
 		return support.NewService(pool), nil
+	}
+
+	getTenantWaste := func(ctx context.Context, orgID string) (*waste.Service, error) {
+		if tenantMgr != nil {
+			tp, err := tenantMgr.PoolForOrg(ctx, orgID)
+			if err != nil {
+				return nil, err
+			}
+			return waste.NewService(tp), nil
+		}
+		return waste.NewService(pool), nil
 	}
 
 	r.Route("/api/v1/organizations", func(r chi.Router) {
@@ -876,6 +937,141 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 				return
 			}
 			writeJSON(w, http.StatusOK, rep)
+		}))
+
+		// --- M06: Waste Intake, Inventory, Sales & Inter-Org Transfers ---
+		r.Post("/{orgId}/waste/intake", requireOrgPerm(orgSvc, iam.PermWasteWeigh, func(w http.ResponseWriter, r *http.Request) {
+			idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if len(idemKey) < 16 || len(idemKey) > 128 {
+				writeError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key header (16-128 chars) is required")
+				return
+			}
+			var body struct {
+				FacilityName     string  `json:"facility_name"`
+				MaterialCategory string  `json:"material_category"`
+				ScaleID          string  `json:"scale_id"`
+				WeightKG         float64 `json:"weight_kg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			wSvc, err := getTenantWaste(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			rec, err := wSvc.RecordIntake(r.Context(), userID, body.FacilityName, body.MaterialCategory, body.ScaleID, idemKey, body.WeightKG)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, rec)
+		}))
+
+		r.Get("/{orgId}/inventory", requireOrgPerm(orgSvc, iam.PermInventoryMove, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			wSvc, err := getTenantWaste(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			items, err := wSvc.ListInventory(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list inventory")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		}))
+
+		r.Post("/{orgId}/sales", requireOrgPerm(orgSvc, iam.PermSalesManage, func(w http.ResponseWriter, r *http.Request) {
+			idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if len(idemKey) < 16 || len(idemKey) > 128 {
+				writeError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key header (16-128 chars) is required")
+				return
+			}
+			var body struct {
+				BuyerName        string  `json:"buyer_name"`
+				MaterialCategory string  `json:"material_category"`
+				QuantityKG       float64 `json:"quantity_kg"`
+				TotalIDR         int64   `json:"total_idr"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			wSvc, err := getTenantWaste(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			ord, err := wSvc.FulfillSale(r.Context(), userID, body.BuyerName, body.MaterialCategory, idemKey, body.QuantityKG, body.TotalIDR)
+			if errors.Is(err, waste.ErrInsufficientStock) {
+				writeError(w, http.StatusUnprocessableEntity, "INSUFFICIENT_STOCK", err.Error())
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, ord)
+		}))
+
+		r.Post("/{orgId}/transfers", requireOrgPerm(orgSvc, iam.PermTransferManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				CounterpartyOrgID string  `json:"counterparty_org_id"`
+				MaterialCategory  string  `json:"material_category"`
+				ProposedKG        float64 `json:"proposed_kg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			wSvc, err := getTenantWaste(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			tr, err := wSvc.ProposeTransfer(r.Context(), userID, body.CounterpartyOrgID, body.MaterialCategory, body.ProposedKG)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, tr)
+		}))
+
+		r.Post("/{orgId}/transfers/{transferId}/receive", requireOrgPerm(orgSvc, iam.PermTransferManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				ReceivedKG float64 `json:"received_kg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			transferID := chi.URLParam(r, "transferId")
+			wSvc, err := getTenantWaste(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			tr, err := wSvc.ReceiveTransfer(r.Context(), userID, transferID, body.ReceivedKG)
+			if errors.Is(err, waste.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "transfer not found")
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, tr)
 		}))
 	})
 

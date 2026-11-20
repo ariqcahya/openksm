@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { apiFetch, newIdempotencyKey } from './api';
 
-type Tab = 'orgs' | 'members' | 'collections' | 'finance' | 'support' | 'tasks';
+type Tab = 'orgs' | 'members' | 'collections' | 'finance' | 'support' | 'waste' | 'tasks';
 
 interface SessionUser {
   id: string;
@@ -51,6 +51,11 @@ interface TaskItem {
   business_type: string;
   state: string;
   priority: string;
+}
+
+interface InventoryItem {
+  material_category: string;
+  available_kg: number;
 }
 
 interface QueuedPickup {
@@ -112,6 +117,9 @@ export default function App() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [ledger, setLedger] = useState<LedgerSummary | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [intakeCat, setIntakeCat] = useState('PET');
+  const [intakeKg, setIntakeKg] = useState('10');
   const [msg, setMsg] = useState('');
 
   // Form states
@@ -163,12 +171,14 @@ export default function App() {
       apiFetch<{ items: Invoice[] }>(`/api/v1/organizations/${orgId}/invoices`),
       apiFetch<LedgerSummary>(`/api/v1/organizations/${orgId}/ledger/summary`),
       apiFetch<{ items: TaskItem[] }>(`/api/v1/organizations/${orgId}/tasks`),
+      apiFetch<{ items: InventoryItem[] }>(`/api/v1/organizations/${orgId}/inventory`),
     ]);
     if (results[0].status === 'fulfilled') setMembers(results[0].value.items || []);
     if (results[1].status === 'fulfilled') setCustomers(results[1].value.items || []);
     if (results[2].status === 'fulfilled') setInvoices(results[2].value.items || []);
     if (results[3].status === 'fulfilled') setLedger(results[3].value);
     if (results[4].status === 'fulfilled') setTasks(results[4].value.items || []);
+    if (results[5].status === 'fulfilled') setInventory(results[5].value.items || []);
   }, []);
 
   useEffect(() => {
@@ -356,7 +366,7 @@ export default function App() {
       </header>
 
       <nav style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '12px 0' }}>
-        {(['orgs', 'members', 'collections', 'finance', 'support', 'tasks'] as Tab[]).map((t) => (
+        {(['orgs', 'members', 'collections', 'finance', 'support', 'waste', 'tasks'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -469,6 +479,45 @@ export default function App() {
         <div style={cardStyle}>
           <h2 style={{ marginTop: 0 }}>Complaints &amp; Scoped Reports (M05)</h2>
           <p><small>Endpoints: <code>/complaints</code>, <code>/complaints/:id/transitions</code>, <code>/reports/summary?from=...&amp;to=...</code> (PII omitted)</small></p>
+        </div>
+      )}
+
+      {tab === 'waste' && (
+        <div style={cardStyle}>
+          <h2 style={{ marginTop: 0 }}>Waste Intake &amp; Inventory (M06)</h2>
+          {inventory.length === 0 ? <p>No inventory yet.</p> : (
+            <ul>
+              {inventory.map((it) => (
+                <li key={it.material_category}><strong>{it.material_category}</strong>: {it.available_kg} kg</li>
+              ))}
+            </ul>
+          )}
+          <h3>Record Intake</h3>
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            if (!selectedOrg) return;
+            setMsg('');
+            try {
+              await apiFetch(`/api/v1/organizations/${selectedOrg}/waste/intake`, {
+                method: 'POST',
+                headers: { 'Idempotency-Key': newIdempotencyKey('intake') },
+                body: JSON.stringify({
+                  facility_name: 'TPS3R Utama',
+                  material_category: intakeCat,
+                  scale_id: 'SCALE-01',
+                  weight_kg: Number(intakeKg),
+                }),
+              });
+              setMsg('Intake recorded.');
+              await loadOrgData(selectedOrg);
+            } catch (err) {
+              setMsg(err instanceof Error ? err.message : 'Failed');
+            }
+          }}>
+            <input style={inputStyle} placeholder="Material Category (e.g. PET)" required value={intakeCat} onChange={(e) => setIntakeCat(e.target.value)} />
+            <input style={inputStyle} type="number" step="0.1" min="0.1" required value={intakeKg} onChange={(e) => setIntakeKg(e.target.value)} />
+            <button style={btnStyle} type="submit">Record Intake (kg)</button>
+          </form>
         </div>
       )}
 

@@ -1,0 +1,17 @@
+# OpenKSM Verified Release & IDNBase Compatibility Lock (M07 / RG-05)
+openksm_version: "0.7.0-dev"
+supported_idnbase_versions:
+  - version: "1.2.1"
+    status: "VERIFIED"
+    images:
+      runtime: "ariqcahya/idnbase-runtime:1.2.1@sha256:6b0e413f9538e427c93bac5d8e2f073544b192ab683c54d77d00d7f488e3c004"
+      caddy: "ariqcahya/idnbase-caddy:1.2.1@sha256:e04411afee0999aeec07e3504c77c14c375f8db5865a135450c2788678789802"
+      postgres: "pgvector/pgvector:pg18@sha256:38681dc6eaf55308e2a4c6de392d131652dcfac70e1263e35cd9b5ea3fe39782"
+      alpine: "alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab"
+    persistent_volumes:
+      - secrets_idnbase
+      - pgdata_idnbase
+      - backups_idnbase
+      - storage_idnbase
+      - caddy_data
+      - caddy_config

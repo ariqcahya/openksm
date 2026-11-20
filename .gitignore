@@ -12,6 +12,7 @@ Thumbs.db
 *.pem
 *.key
 *.crt
+backups/
 
 # Go
 bin/

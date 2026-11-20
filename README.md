@@ -20,9 +20,33 @@
 - **Frontend:** React + TypeScript + Vite (PWA)
 - **Data Infrastructure:** PostgreSQL (database-per-organization isolation), private object storage, and containerized deployment
 
-## Getting Started
+## Getting Started (Self-Hosted Docker)
 
-Setup instructions and Docker Compose configuration will be published here once the initial MVP infrastructure milestone is ready.
+> **Prerequisites:** Linux / macOS with Docker Engine & Docker Compose plugin, `openssl`.
+
+1. **Generate `.env` with secure random secrets (`chmod 600`):**
+   ```bash
+   ./scripts/openksm.sh setup
+   ```
+2. **Verify host prerequisites and Compose configuration:**
+   ```bash
+   ./scripts/openksm.sh doctor
+   ```
+3. **Build and start the OpenKSM + IDNBase stack:**
+   ```bash
+   ./scripts/openksm.sh up
+   ```
+4. **Operations & Recovery:**
+   - Check status: `./scripts/openksm.sh status`
+   - Create checksummed backup: `./scripts/openksm.sh backup`
+   - Run isolated restore drill: `./scripts/openksm.sh restore-drill`
+   - Check IDNBase upgrade compatibility: `./scripts/openksm.sh upgrade-check 1.2.1`
+
+## Compatibility Matrix
+
+| OpenKSM Version | Verified IDNBase Version | Notes |
+|---|---|---|
+| `0.7.0-dev` | `1.2.1` | Digest-pinned unmodified official IDNBase images (`deploy/manifest.lock.yaml`) |
 
 ## Contributing
 
