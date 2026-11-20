@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/openksm/openksm/backend/internal/attachment"
 	"github.com/openksm/openksm/backend/internal/collection"
 	"github.com/openksm/openksm/backend/internal/finance"
 	"github.com/openksm/openksm/backend/internal/iam"
@@ -239,6 +242,17 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			return waste.NewService(tp), nil
 		}
 		return waste.NewService(pool), nil
+	}
+
+	getTenantAttach := func(ctx context.Context, orgID string) (*attachment.Service, error) {
+		if tenantMgr != nil {
+			tp, err := tenantMgr.PoolForOrg(ctx, orgID)
+			if err != nil {
+				return nil, err
+			}
+			return attachment.NewService(tp), nil
+		}
+		return attachment.NewService(pool), nil
 	}
 
 	r.Route("/api/v1/organizations", func(r chi.Router) {
@@ -1090,6 +1104,68 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 				return
 			}
 			writeJSON(w, http.StatusOK, tr)
+		}))
+
+		// --- NFR-SEC-06 / FR-028: Scoped Private Attachments ---
+		r.Post("/{orgId}/attachments", requireOrgPerm(orgSvc, iam.PermTaskRead, func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseMultipartForm(attachment.MaxAttachmentBytes + 4096); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_MULTIPART", "file exceeds 5MB limit or malformed form")
+				return
+			}
+			resourceType := r.FormValue("resource_type")
+			resourceID := r.FormValue("resource_id")
+			if resourceType == "" || resourceID == "" {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "resource_type and resource_id required")
+				return
+			}
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "file field is required")
+				return
+			}
+			defer file.Close()
+			data, err := io.ReadAll(io.LimitReader(file, attachment.MaxAttachmentBytes+1))
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "READ_ERROR", "failed to read uploaded file")
+				return
+			}
+			mimeType, err := attachment.ValidateContent(data)
+			if err != nil {
+				writeError(w, http.StatusUnprocessableEntity, "INVALID_FILE", err.Error())
+				return
+			}
+
+			orgID := chi.URLParam(r, "orgId")
+			attSvc, err := getTenantAttach(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			objectKey := fmt.Sprintf("%s/%s/%s", resourceType, resourceID, uuid.NewString())
+			rec, err := attSvc.SaveMetadata(r.Context(), userID, resourceType, resourceID, "openksm-evidence", objectKey, mimeType, int64(len(data)))
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, rec)
+		}))
+
+		r.Get("/{orgId}/attachments", requireOrgPerm(orgSvc, iam.PermTaskRead, func(w http.ResponseWriter, r *http.Request) {
+			resourceType := r.URL.Query().Get("resource_type")
+			resourceID := r.URL.Query().Get("resource_id")
+			orgID := chi.URLParam(r, "orgId")
+			attSvc, err := getTenantAttach(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			items, err := attSvc.ListByResource(r.Context(), resourceType, resourceID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		}))
 	})
 

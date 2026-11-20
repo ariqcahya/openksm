@@ -177,6 +177,7 @@ services:
       OPENKSM_HTTP_ADDR: ":8080"
       IDNBASE_CONTROL_URL: "http://control-api:3000"
       IDNBASE_GATEWAY_URL: "http://graphql-gateway:4000"
+      OPENKSM_AUTH_PROJECT_SLUG: "${OPENKSM_AUTH_PROJECT_SLUG:-}"
       OPENKSM_REGISTRY_DATABASE_URL: "postgres://openksm_registry_app:${OPENKSM_REGISTRY_DB_PASSWORD:?OPENKSM_REGISTRY_DB_PASSWORD must be set}@postgres:5432/openksm_registry?sslmode=disable"
       OPENKSM_TENANT_DB_BASE_URL: "postgres://idnbase_bootstrap:${POSTGRES_BOOTSTRAP_PASSWORD:?POSTGRES_BOOTSTRAP_PASSWORD must be set}@postgres:5432?sslmode=disable"
     networks:

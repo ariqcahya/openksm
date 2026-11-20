@@ -94,8 +94,9 @@ func runAPI(ctx context.Context, pool *pgxpool.Pool) {
 	if gatewayURL == "" {
 		gatewayURL = "http://graphql-gateway:4000"
 	}
+	authProjectSlug := os.Getenv("OPENKSM_AUTH_PROJECT_SLUG")
 
-	idnClient := idnbase.NewClient(controlURL, gatewayURL)
+	idnClient := idnbase.NewClient(controlURL, gatewayURL, authProjectSlug)
 	var orgSvc *org.Service
 	var tenantMgr *tenantdb.Manager
 	if pool != nil {

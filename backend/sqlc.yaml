@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "queries/registry.sql"
+    schema: "migrations/registry/001_init_registry.sql"
+    gen:
+      go:
+        package: "registrydb"
+        out: "internal/db/registrydb"
+        sql_package: "pgx/v5"

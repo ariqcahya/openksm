@@ -13,20 +13,26 @@ import (
 
 // Client wraps verified IDNBase v1.2.1 control-api and End-User Auth v2 endpoints.
 type Client struct {
-	baseURL    string
-	gatewayURL string
-	httpClient *http.Client
+	baseURL         string
+	gatewayURL      string
+	authProjectSlug string
+	httpClient      *http.Client
 }
 
 // NewClient creates a new IDNBase control-plane client.
-func NewClient(baseURL string, gatewayURL ...string) *Client {
+func NewClient(baseURL string, opts ...string) *Client {
 	gw := "http://graphql-gateway:4000"
-	if len(gatewayURL) > 0 && strings.TrimSpace(gatewayURL[0]) != "" {
-		gw = strings.TrimRight(gatewayURL[0], "/")
+	if len(opts) > 0 && strings.TrimSpace(opts[0]) != "" {
+		gw = strings.TrimRight(opts[0], "/")
+	}
+	slug := ""
+	if len(opts) > 1 {
+		slug = strings.TrimSpace(opts[1])
 	}
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		gatewayURL: gw,
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		gatewayURL:      gw,
+		authProjectSlug: slug,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -97,8 +103,8 @@ func (c *Client) VerifySession(ctx context.Context, sessionCookie string) (*Sess
 		}
 	}
 
-	if token := extractCookieValue(sessionCookie, "openksm_enduser_token"); token != "" && c.gatewayURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.gatewayURL+"/auth/v1/ksm-sleman-01/user", nil)
+	if token := extractCookieValue(sessionCookie, "openksm_enduser_token"); token != "" && c.gatewayURL != "" && c.authProjectSlug != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.gatewayURL+"/auth/v1/"+c.authProjectSlug+"/user", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -238,12 +244,12 @@ func (c *Client) Login(ctx context.Context, email, password string) (*LoginResul
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusUnauthorized || c.gatewayURL == "" {
+	if resp.StatusCode != http.StatusUnauthorized || c.gatewayURL == "" || c.authProjectSlug == "" {
 		return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
 	}
 
-	// Fallback to End-User Auth v2 (/auth/v1/ksm-sleman-01/token)
-	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, c.gatewayURL+"/auth/v1/ksm-sleman-01/token", bytes.NewReader(bodyBytes))
+	// Fallback to End-User Auth v2 (/auth/v1/:slug/token)
+	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, c.gatewayURL+"/auth/v1/"+c.authProjectSlug+"/token", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -291,4 +297,53 @@ func (c *Client) VerifyMFA(ctx context.Context, challengeToken, code string) (*L
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return &LoginResult{StatusCode: resp.StatusCode, Body: raw, Cookies: resp.Cookies()}, nil
+}
+
+// RequestSignedURL requests a short-lived upload or download URL from IDNBase storage.
+func (c *Client) RequestSignedURL(ctx context.Context, sessionCookie, csrfToken, projectID, bucketName, action, objectKey string) (string, error) {
+	bodyBytes, _ := json.Marshal(map[string]string{"action": action, "objectKey": objectKey})
+	u := fmt.Sprintf("%s/v1/projects/%s/storage/buckets/%s/signed-url", c.baseURL, projectID, bucketName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", sessionCookie)
+	if csrfToken != "" {
+		req.Header.Set("X-CSRF-Token", csrfToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("signed-url failed (%d): %s", resp.StatusCode, string(raw))
+	}
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.URL, nil
+}
+
+// UploadToSignedURL uploads bytes to an IDNBase presigned URL path.
+func (c *Client) UploadToSignedURL(ctx context.Context, signedPath, contentType string, data []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+signedPath, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", contentType)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("storage upload failed with status %d", resp.StatusCode)
+	}
+	return nil
 }
