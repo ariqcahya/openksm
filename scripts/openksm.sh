@@ -41,13 +41,15 @@ cmd_setup() {
     exit 1
   fi
 
-  local pg_pass master_key jwt_secret
+  local pg_pass reg_pass master_key jwt_secret
   pg_pass="$(gen_hex 24)"
+  reg_pass="$(gen_hex 24)"
   master_key="$(gen_hex 32)"
   jwt_secret="$(gen_hex 32)"
 
   sed \
     -e "s|^POSTGRES_BOOTSTRAP_PASSWORD=.*|POSTGRES_BOOTSTRAP_PASSWORD=${pg_pass}|" \
+    -e "s|^OPENKSM_REGISTRY_DB_PASSWORD=.*|OPENKSM_REGISTRY_DB_PASSWORD=${reg_pass}|" \
     -e "s|^MASTER_KEY_HEX=.*|MASTER_KEY_HEX=${master_key}|" \
     -e "s|^GRAPHQL_JWT_SECRET=.*|GRAPHQL_JWT_SECRET=${jwt_secret}|" \
     "${ENV_EXAMPLE}" > "${ENV_FILE}"

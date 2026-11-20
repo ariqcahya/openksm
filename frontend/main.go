@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-//go:embed public/*
+//go:embed dist/*
 var content embed.FS
 
 func main() {
-	sub, err := fs.Sub(content, "public")
+	sub, err := fs.Sub(content, "dist")
 	if err != nil {
 		log.Fatal(err)
 	}
