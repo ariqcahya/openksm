@@ -16,6 +16,7 @@ import (
 	"github.com/openksm/openksm/backend/internal/iam"
 	"github.com/openksm/openksm/backend/internal/org"
 	"github.com/openksm/openksm/backend/internal/platform/idnbase"
+	"github.com/openksm/openksm/backend/internal/support"
 	"github.com/openksm/openksm/backend/internal/tenantdb"
 )
 
@@ -164,6 +165,17 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			return finance.NewService(tp), nil
 		}
 		return finance.NewService(pool), nil
+	}
+
+	getTenantSup := func(ctx context.Context, orgID string) (*support.Service, error) {
+		if tenantMgr != nil {
+			tp, err := tenantMgr.PoolForOrg(ctx, orgID)
+			if err != nil {
+				return nil, err
+			}
+			return support.NewService(tp), nil
+		}
+		return support.NewService(pool), nil
 	}
 
 	r.Route("/api/v1/organizations", func(r chi.Router) {
@@ -757,6 +769,113 @@ func NewRouter(pool *pgxpool.Pool, tenantMgr *tenantdb.Manager, verifier Session
 			default:
 				writeJSON(w, http.StatusOK, adj)
 			}
+		}))
+
+		// --- M05: Complaints (SLA/Reopen) & Scoped Reports (No PII) ---
+		r.Get("/{orgId}/complaints", requireOrgPerm(orgSvc, iam.PermComplaintManage, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			supSvc, err := getTenantSup(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			items, err := supSvc.ListComplaints(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list complaints")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		}))
+
+		r.Post("/{orgId}/complaints", requireOrgPerm(orgSvc, iam.PermComplaintManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				ServicePointID string    `json:"service_point_id"`
+				Title          string    `json:"title"`
+				Description    string    `json:"description"`
+				DueAt          time.Time `json:"due_at"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			supSvc, err := getTenantSup(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			c, err := supSvc.CreateComplaint(r.Context(), userID, body.ServicePointID, body.Title, body.Description, body.DueAt)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusCreated, c)
+		}))
+
+		r.Post("/{orgId}/complaints/{complaintId}/transitions", requireOrgPerm(orgSvc, iam.PermComplaintManage, func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				State       string `json:"state"`
+				AssigneeRef string `json:"assignee_ref"`
+				Note        string `json:"note"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "malformed request body")
+				return
+			}
+			orgID := chi.URLParam(r, "orgId")
+			complaintID := chi.URLParam(r, "complaintId")
+			supSvc, err := getTenantSup(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			c, err := supSvc.TransitionComplaint(r.Context(), userID, complaintID, body.State, body.AssigneeRef, body.Note)
+			switch {
+			case errors.Is(err, support.ErrNotFound):
+				writeError(w, http.StatusNotFound, "NOT_FOUND", "complaint not found")
+			case errors.Is(err, support.ErrInvalidTransition):
+				writeError(w, http.StatusUnprocessableEntity, "INVALID_TRANSITION", err.Error())
+			case err != nil:
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+			default:
+				writeJSON(w, http.StatusOK, c)
+			}
+		}))
+
+		r.Get("/{orgId}/complaints/{complaintId}/timeline", requireOrgPerm(orgSvc, iam.PermComplaintManage, func(w http.ResponseWriter, r *http.Request) {
+			orgID := chi.URLParam(r, "orgId")
+			complaintID := chi.URLParam(r, "complaintId")
+			supSvc, err := getTenantSup(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			events, err := supSvc.GetTimeline(r.Context(), complaintID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load timeline")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": events})
+		}))
+
+		r.Get("/{orgId}/reports/summary", requireOrgPerm(orgSvc, iam.PermReportExport, func(w http.ResponseWriter, r *http.Request) {
+			fromDate := r.URL.Query().Get("from")
+			toDate := r.URL.Query().Get("to")
+			orgID := chi.URLParam(r, "orgId")
+			supSvc, err := getTenantSup(r.Context(), orgID)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "TENANT_DB_UNAVAILABLE", err.Error())
+				return
+			}
+			userID := r.Context().Value(userRefIDKey).(string)
+			rep, err := supSvc.ExportScopedSummary(r.Context(), userID, fromDate, toDate)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, rep)
 		}))
 	})
 

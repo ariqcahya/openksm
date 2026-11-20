@@ -18,12 +18,14 @@ const (
 	RoleInstanceAdmin = "instance_admin"
 	RoleOrgOwner       = "org_owner"
 	RoleOrgAdmin       = "org_admin"
-	RoleTreasurer      = "treasurer"
-	RoleBillingOfficer = "billing_officer"
-	RoleCashier        = "cashier"
-	RoleOpsManager     = "ops_manager"
-	RoleCollector      = "collection_officer"
-	RoleCustomer       = "customer"
+	RoleTreasurer       = "treasurer"
+	RoleBillingOfficer  = "billing_officer"
+	RoleCashier         = "cashier"
+	RoleOpsManager      = "ops_manager"
+	RoleCollector       = "collection_officer"
+	RoleCustomerService = "customer_service"
+	RoleOrgAuditor      = "org_auditor"
+	RoleCustomer        = "customer"
 )
 
 // Permission constants.
@@ -44,6 +46,8 @@ const (
 	PermPaymentVerify     = "payment:verify"
 	PermPaymentReverse    = "payment:reverse"
 	PermFinanceRead       = "finance:read"
+	PermComplaintManage   = "complaint:manage"
+	PermReportExport      = "report:export"
 	PermAuditRead         = "audit:read"
 )
 
@@ -72,6 +76,8 @@ var rolePermissions = map[string]map[string]bool{
 		PermPaymentVerify:     true,
 		PermPaymentReverse:    true,
 		PermFinanceRead:       true,
+		PermComplaintManage:   true,
+		PermReportExport:      true,
 		PermAuditRead:         true,
 	},
 	RoleOrgAdmin: {
@@ -82,12 +88,14 @@ var rolePermissions = map[string]map[string]bool{
 		PermAreaManage:       true,
 		PermCustomerManage:   true,
 		PermCollectionAssign: true,
+		PermComplaintManage:  true,
 		PermTaskRead:         true,
 	},
 	RoleTreasurer: {
 		PermPaymentVerify:  true,
 		PermPaymentReverse: true,
 		PermFinanceRead:    true,
+		PermReportExport:   true,
 		PermAuditRead:      true,
 	},
 	RoleBillingOfficer: {
@@ -102,11 +110,21 @@ var rolePermissions = map[string]map[string]bool{
 		PermUnitManage:       true,
 		PermAreaManage:       true,
 		PermCollectionAssign: true,
+		PermComplaintManage:  true,
 		PermTaskRead:         true,
 	},
 	RoleCollector: {
 		PermCollectionExecute: true,
 		PermTaskRead:          true,
+	},
+	RoleCustomerService: {
+		PermComplaintManage: true,
+		PermTaskRead:        true,
+	},
+	RoleOrgAuditor: {
+		PermFinanceRead:  true,
+		PermReportExport: true,
+		PermAuditRead:    true,
 	},
 }
 

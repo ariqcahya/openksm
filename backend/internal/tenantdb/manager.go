@@ -74,7 +74,7 @@ func (m *Manager) PoolForOrg(ctx context.Context, orgID string) (*pgxpool.Pool, 
 		return nil, err
 	}
 
-	for _, mig := range []string{"tenant/001_init_tenant.sql", "tenant/002_m03_collections.sql", "tenant/003_m04_finance.sql"} {
+	for _, mig := range []string{"tenant/001_init_tenant.sql", "tenant/002_m03_collections.sql", "tenant/003_m04_finance.sql", "tenant/004_m05_complaints_reports.sql"} {
 		sqlBytes, err := migrations.FS.ReadFile(mig)
 		if err != nil {
 			pool.Close()

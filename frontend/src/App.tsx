@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { apiFetch, newIdempotencyKey } from './api';
 
-type Tab = 'orgs' | 'members' | 'collections' | 'finance' | 'tasks';
+type Tab = 'orgs' | 'members' | 'collections' | 'finance' | 'support' | 'tasks';
 
 interface SessionUser {
   id: string;
@@ -356,7 +356,7 @@ export default function App() {
       </header>
 
       <nav style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '12px 0' }}>
-        {(['orgs', 'members', 'collections', 'finance', 'tasks'] as Tab[]).map((t) => (
+        {(['orgs', 'members', 'collections', 'finance', 'support', 'tasks'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -462,6 +462,13 @@ export default function App() {
               ))}
             </ul>
           )}
+        </div>
+      )}
+
+      {tab === 'support' && (
+        <div style={cardStyle}>
+          <h2 style={{ marginTop: 0 }}>Complaints &amp; Scoped Reports (M05)</h2>
+          <p><small>Endpoints: <code>/complaints</code>, <code>/complaints/:id/transitions</code>, <code>/reports/summary?from=...&amp;to=...</code> (PII omitted)</small></p>
         </div>
       )}
 
