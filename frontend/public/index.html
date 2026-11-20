@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenKSM — Community Waste Management</title>
+    <style>
+      body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem 1rem; background: #f8fafc; color: #0f172a; }
+      main { max-width: 640px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; }
+      h1 { margin-top: 0; font-size: 1.5rem; }
+      .badge { display: inline-block; padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.85rem; background: #dcfce7; color: #166534; }
+      pre { background: #f1f5f9; padding: 0.75rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OpenKSM</h1>
+      <p>Self-Hosted Community Waste Management Platform (M01 Infrastructure Scaffold).</p>
+      <p>Status API: <span id="status" class="badge">checking...</span></p>
+      <pre id="details"></pre>
+    </main>
+    <script>
+      Promise.all([
+        fetch('/api/v1/info').then(r => r.json()),
+        fetch('/health/ready').then(r => r.json())
+      ]).then(([info, health]) => {
+        document.getElementById('status').textContent = health.status;
+        document.getElementById('details').textContent = JSON.stringify({ info, health }, null, 2);
+      }).catch(err => {
+        document.getElementById('status').textContent = 'error';
+        document.getElementById('details').textContent = String(err);
+      });
+    </script>
+  </body>
+</html>

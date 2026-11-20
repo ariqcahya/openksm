@@ -1,0 +1,33 @@
+{
+    admin off
+}
+
+{$OPENKSM_SITE::80} {
+    encode zstd gzip
+
+    # Block direct public access to IDNBase internal data/control endpoints (IDC-11)
+    @blocked_internal {
+        path /v1/* /rest/* /gql/* /auth/* /storage/* /realtime/*
+    }
+    respond @blocked_internal 404
+
+    # Route API and health endpoints to OpenKSM Go Core API
+    handle /api/* {
+        reverse_proxy api:8080
+    }
+
+    handle /health/* {
+        reverse_proxy api:8080
+    }
+
+    # Route frontend traffic to OpenKSM React PWA
+    handle {
+        reverse_proxy web:8080
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        X-Frame-Options DENY
+    }
+}

@@ -1,0 +1,261 @@
+name: openksm
+
+services:
+  # ---------------------------------------------------------------------------
+  # IDNBase Data & Control Plane (v1.2.1, digest-pinned)
+  # ---------------------------------------------------------------------------
+  init-secrets:
+    image: alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
+    restart: "no"
+    environment:
+      POSTGRES_BOOTSTRAP_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:?POSTGRES_BOOTSTRAP_PASSWORD must be set}
+      MASTER_KEY_HEX: ${MASTER_KEY_HEX:?MASTER_KEY_HEX must be set}
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s' "$POSTGRES_BOOTSTRAP_PASSWORD" > /run/secrets/postgres_bootstrap_password && \
+        printf '%s' "$MASTER_KEY_HEX" > /run/secrets/master_key_hex && \
+        chmod 444 /run/secrets/postgres_bootstrap_password /run/secrets/master_key_hex
+    volumes:
+      - secrets_idnbase:/run/secrets
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: pgvector/pgvector:pg18@sha256:38681dc6eaf55308e2a4c6de392d131652dcfac70e1263e35cd9b5ea3fe39782
+    restart: unless-stopped
+    depends_on:
+      init-secrets:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: idnbase_control
+      POSTGRES_USER: idnbase_bootstrap
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+    volumes:
+      - secrets_idnbase:/run/secrets:ro
+      - pgdata_idnbase:/var/lib/postgresql
+    networks:
+      - control_net
+      - data_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idnbase_bootstrap -d idnbase_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    security_opt:
+      - no-new-privileges:true
+
+  idnbase-migrate:
+    image: ariqcahya/idnbase-runtime:1.2.1@sha256:6b0e413f9538e427c93bac5d8e2f073544b192ab683c54d77d00d7f488e3c004
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "packages/db/dist/cli.js", "up"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: idnbase_bootstrap
+      PGDATABASE: idnbase_control
+      CONTROL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+    volumes:
+      - secrets_idnbase:/run/secrets:ro
+    networks:
+      - control_net
+    security_opt:
+      - no-new-privileges:true
+
+  control-api:
+    image: ariqcahya/idnbase-runtime:1.2.1@sha256:6b0e413f9538e427c93bac5d8e2f073544b192ab683c54d77d00d7f488e3c004
+    restart: unless-stopped
+    depends_on:
+      idnbase-migrate:
+        condition: service_completed_successfully
+    command: ["node", "apps/control-api/dist/server.js"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: idnbase_bootstrap
+      PGDATABASE: idnbase_control
+      CONTROL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+      MASTER_KEY_FILE: /run/secrets/master_key_hex
+      GRAPHQL_JWT_SECRET: ${GRAPHQL_JWT_SECRET:?GRAPHQL_JWT_SECRET must be set}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      BACKUP_DIR: /app/backups
+      STORAGE_DIR: /app/storage
+    volumes:
+      - secrets_idnbase:/run/secrets:ro
+      - backups_idnbase:/app/backups
+      - storage_idnbase:/app/storage
+    networks:
+      - control_net
+      - data_net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  idnbase-worker:
+    image: ariqcahya/idnbase-runtime:1.2.1@sha256:6b0e413f9538e427c93bac5d8e2f073544b192ab683c54d77d00d7f488e3c004
+    restart: unless-stopped
+    depends_on:
+      idnbase-migrate:
+        condition: service_completed_successfully
+    command: ["node", "apps/worker/dist/index.js"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: idnbase_bootstrap
+      PGDATABASE: idnbase_control
+      CONTROL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+      MASTER_KEY_FILE: /run/secrets/master_key_hex
+      BACKUP_DIR: /app/backups
+    volumes:
+      - secrets_idnbase:/run/secrets:ro
+      - backups_idnbase:/app/backups
+    networks:
+      - control_net
+      - data_net
+    security_opt:
+      - no-new-privileges:true
+
+  graphql-gateway:
+    image: ariqcahya/idnbase-runtime:1.2.1@sha256:6b0e413f9538e427c93bac5d8e2f073544b192ab683c54d77d00d7f488e3c004
+    restart: unless-stopped
+    depends_on:
+      idnbase-migrate:
+        condition: service_completed_successfully
+    command: ["node", "apps/graphql-gateway/dist/server.js"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4000"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: idnbase_bootstrap
+      PGDATABASE: idnbase_control
+      CONTROL_DATABASE_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+      MASTER_KEY_FILE: /run/secrets/master_key_hex
+      GRAPHQL_JWT_SECRET: ${GRAPHQL_JWT_SECRET:?GRAPHQL_JWT_SECRET must be set}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:8080}
+      STORAGE_DIR: /app/storage
+    volumes:
+      - secrets_idnbase:/run/secrets:ro
+      - storage_idnbase:/app/storage
+    networks:
+      - control_net
+      - data_net
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # OpenKSM Application Plane (Core Go API, Outbox Worker, React PWA)
+  # ---------------------------------------------------------------------------
+  api:
+    image: ${OPENKSM_API_IMAGE:-openksm/api:dev}
+    build:
+      context: ../backend
+    restart: unless-stopped
+    depends_on:
+      control-api:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      OPENKSM_HTTP_ADDR: ":8080"
+      IDNBASE_CONTROL_URL: "http://control-api:3000"
+      IDNBASE_GATEWAY_URL: "http://graphql-gateway:4000"
+    networks:
+      - front
+      - control_net
+      - data_net
+
+  worker:
+    image: ${OPENKSM_API_IMAGE:-openksm/api:dev}
+    command: ["worker"]
+    restart: unless-stopped
+    depends_on:
+      control-api:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      IDNBASE_CONTROL_URL: "http://control-api:3000"
+    networks:
+      - control_net
+      - data_net
+
+  web:
+    image: ${OPENKSM_WEB_IMAGE:-openksm/web:dev}
+    build:
+      context: ../frontend
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    networks:
+      - front
+
+  # ---------------------------------------------------------------------------
+  # Edge TLS Ingress (Only service publishing external ports)
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: ariqcahya/idnbase-caddy:1.2.1@sha256:e04411afee0999aeec07e3504c77c14c375f8db5865a135450c2788678789802
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+      - "${HTTP_PORT:-8080}:80"
+    environment:
+      OPENKSM_SITE: ${OPENKSM_SITE:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - front
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  front:
+    driver: bridge
+  control_net:
+    driver: bridge
+    internal: true
+  data_net:
+    driver: bridge
+    internal: true
+
+volumes:
+  secrets_idnbase: {}
+  pgdata_idnbase: {}
+  backups_idnbase: {}
+  storage_idnbase: {}
+  caddy_data: {}
+  caddy_config: {}
